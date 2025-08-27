@@ -1,0 +1,32 @@
+name: Sync CSV feeds
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # toutes les 5 minutes
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Pepperstone & TwelveData
+        run: |
+          mkdir -p data
+          curl -L 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSjc-6ABzDBiXbr1M6Fhk1BmFTjlYZ1G-luETCq7jKlFFDFVjsqVriatmEVqbre_-PbzQmha52xtAm5/pub?gid=0&single=true&output=csv' -o data/pepperstone.csv
+          curl -L 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS5rspFC_1UTjyhKu9f0hn47yKeqZXaNU01Mdt1YIM4lrqenKJgdF21-wE5fPlJ1w1XIA_Q0zsTrFw1/pub?gid=0&single=true&output=csv' -o data/twelvedata.csv
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > data/last_updated.txt
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Update feeds"
+            git push
+          else
+            echo "No changes to commit"
+          fi
