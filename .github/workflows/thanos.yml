@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # toutes les 15 minutes
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -15,119 +15,114 @@ jobs:
       - uses: actions/checkout@v4
         with: { persist-credentials: true }
 
-      - name: Fetch feeds (Pepperstone & TwelveData)
+      - name: Print env & time
         run: |
+          uname -a
+          date -u
+
+      - name: Fetch feeds (Pepperstone & TwelveData) with verbose logs
+        run: |
+          set -e
           mkdir -p data
-          curl -L --fail -A "Mozilla/5.0" \
+          echo "Downloading Pepperstone..."
+          curl -v -L --fail --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
             'https://raw.githubusercontent.com/meryemmi2000-ui/eurusd-feeds/refs/heads/main/data/pepperstone.csv' \
             -o data/pepperstone.csv
-          curl -L --fail -A "Mozilla/5.0" \
+          echo "Downloading TwelveData..."
+          curl -v -L --fail --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
             'https://raw.githubusercontent.com/meryemmi2000-ui/eurusd-feeds/refs/heads/main/data/twelvedata.csv' \
             -o data/twelvedata.csv
+          echo "Files sizes:"
+          wc -c data/*.csv || true
           date -u +"%Y-%m-%d %H:%M:%S UTC" > data/last_updated.txt
 
-      - name: Run THANOS analysis
+      - name: Run THANOS analysis (safe)
         run: |
           python - <<'PY'
-          import pandas as pd, re
-          from datetime import datetime, timezone
+          import pandas as pd, re, sys
+          from datetime import datetime
           from pathlib import Path
 
-          # --- load TwelveData (semicolon CSV): datetime;open;high;low;close
-          td = pd.read_csv('data/twelvedata.csv', sep=';', dtype=str)
-          td = td.dropna(subset=['datetime'])
-          for c in ['open','high','low','close']:
-              td[c] = td[c].astype(float)
-          td['datetime'] = pd.to_datetime(td['datetime'], errors='coerce')
-          td = td.dropna(subset=['datetime']).sort_values('datetime')
-          td['source'] = 'twelvedata'
+          def load_td(path: Path):
+            try:
+              df = pd.read_csv(path, sep=';')
+              df = df[['datetime','open','high','low','close']]
+              df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
+              df = df.dropna(subset=['datetime'])
+              for c in ['open','high','low','close']: df[c] = pd.to_numeric(df[c], errors='coerce')
+              df = df.dropna().sort_values('datetime')
+              df['source'] = 'twelvedata'
+              return df
+            except Exception as e:
+              print("TD load error:", e, file=sys.stderr)
+              return pd.DataFrame(columns=['datetime','open','high','low','close','source'])
 
-          # --- load Pepperstone (raw lines "YYYY.MM.DD HH:MM O H L C ...")
-          rx = re.compile(r'(\d{4}\.\d{2}\.\d{2})\s+(\d{2}:\d{2})(?::\d{2})?\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)')
-          rows=[]
-          for ln in Path('data/pepperstone.csv').read_text(encoding='utf-8', errors='ignore').splitlines():
-              m = rx.search(ln)
-              if m:
+          def load_ps(path: Path):
+            try:
+              rx = re.compile(r'(\d{4}\.\d{2}\.\d{2})\s+(\d{2}:\d{2})(?::\d{2})?\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)')
+              rows=[]
+              for ln in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+                m = rx.search(ln)
+                if m:
                   d,t,o,h,l,c = m.groups()
                   ts = pd.to_datetime(d.replace('.','-')+' '+t+':00', errors='coerce')
                   rows.append((ts,float(o),float(h),float(l),float(c)))
-          ps = pd.DataFrame(rows, columns=['datetime','open','high','low','close']).dropna()
-          ps = ps.sort_values('datetime')
-          ps['source'] = 'pepperstone'
+              df = pd.DataFrame(rows, columns=['datetime','open','high','low','close']).dropna()
+              df = df.sort_values('datetime')
+              df['source'] = 'pepperstone'
+              return df
+            except Exception as e:
+              print("PS load error:", e, file=sys.stderr)
+              return pd.DataFrame(columns=['datetime','open','high','low','close','source'])
 
-          # --- choose active feed: pick the freshest last timestamp
+          td = load_td(Path('data/twelvedata.csv'))
+          ps = load_ps(Path('data/pepperstone.csv'))
+
+          if len(td)==0 and len(ps)==0:
+            Path('data/thanos_summary.md').write_text("No data available from either source.\n")
+            sys.exit(0)
+
           last_td = td['datetime'].max() if len(td) else None
           last_ps = ps['datetime'].max() if len(ps) else None
           active = ps if (last_ps and (not last_td or last_ps >= last_td)) else td
-          active_name = active['source'].iat[0] if len(active) else 'none'
+          active_name = active['source'].iloc[0] if len(active) else 'unknown'
 
-          # --- normalize to 5m grid & keep recent
           df = active.copy()
           if len(df)==0:
-              Path('data/thanos_summary.md').write_text("No data available.\n")
-              raise SystemExit(0)
+            Path('data/thanos_summary.md').write_text("Active feed empty.\n")
+            sys.exit(0)
+
           df['datetime'] = df['datetime'].dt.floor('5min')
           df = df.drop_duplicates(subset=['datetime']).sort_values('datetime')
-          df = df[df['datetime'] <= pd.Timestamp.utcnow().tz_localize('UTC').tz_convert('UTC')]  # keep closed
 
-          # --- compute rolling 20H/20L and signals (3 pips buffer)
-          pip = 0.0001
-          thr = 3 * pip
+          pip = 0.0001; thr = 3*pip
           df['rollH20'] = df['high'].rolling(20, min_periods=20).max().shift(1)
           df['rollL20'] = df['low'].rolling(20, min_periods=20).min().shift(1)
-          df['up2closes'] = (df['close'] > (df['rollH20'] + thr)) & (df['close'].shift(1) > (df['rollH20'].shift(1) + thr))
-          df['dn2closes'] = (df['close'] < (df['rollL20'] - thr)) & (df['close'].shift(1) < (df['rollL20'].shift(1) - thr))
+          df['up2closes']  = (df['close'] > (df['rollH20'] + thr)) & (df['close'].shift(1) > (df['rollH20'].shift(1) + thr))
+          df['dn2closes']  = (df['close'] < (df['rollL20'] - thr)) & (df['close'].shift(1) < (df['rollL20'].shift(1) - thr))
 
-          last = df.iloc[-1]
-          signals=[]
-          if bool(last.get('up2closes', False)):
-              signals.append({'type':'breakout_up_2closes','at':str(last['datetime']), 'close':float(last['close']), 'rollH20':float(last['rollH20'])})
-          if bool(last.get('dn2closes', False)):
-              signals.append({'type':'breakout_down_2closes','at':str(last['datetime']), 'close':float(last['close']), 'rollL20':float(last['rollL20'])})
-
-          # --- write unified feed + summary
           out = df[['datetime','open','high','low','close']].copy()
           out.to_csv('data/thanos_ready.csv', index=False)
+
+          last = df.iloc[-1]
           lines = [
-              "# THANOS — EURUSD M5 (every 15m)",
-              f"Active feed: **{active_name}**",
-              f"Last candle: {last['datetime']:%Y-%m-%d %H:%M:%S}  O={last['open']:.5f} H={last['high']:.5f} L={last['low']:.5f} C={last['close']:.5f}",
-              "",
-              "## Signals (last closed candle)"
+            "# THANOS — EURUSD M5",
+            f"Active feed: **{active_name}**",
+            f"Last candle: {last['datetime']:%Y-%m-%d %H:%M:%S}",
+            ""
           ]
-          if not signals:
-              lines.append("- No signal on last candle.")
-              flag = ""
-          else:
-              for s in signals:
-                  if s['type'].startswith('breakout_up'):
-                      lines.append(f"- ✅ **UP** 2-closes above 20H (+3 pips) at {s['at']} — C={s['close']:.5f}")
-                  else:
-                      lines.append(f"- ✅ **DOWN** 2-closes below 20L (−3 pips) at {s['at']} — C={s['close']:.5f}")
-              flag = "ALERT"
+          if bool(last.get('up2closes', False)):
+            lines.append(f"- ✅ UP 2-closes above H20 (+3 pips). Close={last['close']:.5f}")
+          if bool(last.get('dn2closes', False)):
+            lines.append(f"- ✅ DOWN 2-closes below L20 (-3 pips). Close={last['close']:.5f}")
+          if len(lines)==3:
+            lines.append("- No signal on last candle.")
           Path('data/thanos_summary.md').write_text("\n".join(lines), encoding='utf-8')
-          Path('data/thanos_flag.txt').write_text(flag)
+          print("\n".join(lines))
           PY
 
       - name: Commit results
         run: |
-          git add data/thanos_ready.csv data/thanos_summary.md data/last_updated.txt data/thanos_flag.txt
-          git commit -m "THANOS run" || true
+          git add data/thanos_ready.csv data/thanos_summary.md data/last_updated.txt
+          git commit -m "THANOS run (robust)" || true
           git push || true
-
-      # (OPTIONNEL) envoi email si signal — à activer après avoir mis les secrets
-      - name: Send email if signal
-        if: ${{ hashFiles('data/thanos_flag.txt') != '' && contains(steps.thanos.outputs, 'ALERT') != true }}
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "THANOS EURUSD: signal"
-          to: ${{ secrets.MAIL_TO }}
-          from: ${{ secrets.MAIL_FROM }}
-          content_type: text/plain
-          body: |
-            THANOS signal on last 5m candle.
-            See summary: https://github.com/${{ github.repository }}/blob/main/data/thanos_summary.md
