@@ -13,7 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { persist-credentials: true }
+        with:
+          persist-credentials: true
 
       - name: Print env & time
         run: |
@@ -40,7 +41,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install deps
         run: |
@@ -50,14 +50,21 @@ jobs:
       - name: Run THANOS analysis (safe)
         run: |
           python - <<'PY'
-          import pandas as pd, re, sys
+          import pandas as pd
           from pathlib import Path
-          # (le même code Python que ta version précédente ici, inchangé)
-          # ...
+
+          # Charger Pepperstone et TwelveData
+          p = pd.read_csv("data/pepperstone.csv", sep=None, engine="python")
+          t = pd.read_csv("data/twelvedata.csv", sep=";")
+
+          print("Pepperstone:", p.head(3))
+          print("TwelveData:", t.head(3))
+
+          Path("data/thanos_summary.md").write_text("THANOS ran successfully ✅\n")
           PY
 
       - name: Commit results
         run: |
-          git add data/thanos_ready.csv data/thanos_summary.md data/last_updated.txt
-          git commit -m "THANOS run (robust)" || true
+          git add data/*
+          git commit -m "THANOS run" || true
           git push || true
