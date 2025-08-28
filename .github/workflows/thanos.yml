@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # toutes les 15 minutes
   workflow_dispatch: {}
 
 jobs:
@@ -13,29 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Print env & time
-        run: |
-          uname -a
-          date -u
-
-      - name: Fetch feeds (Pepperstone & TwelveData) with verbose logs
-        run: |
-          set -e
-          mkdir -p data
-          echo "Downloading Pepperstone..."
-          curl -v -L --fail --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
-            'https://raw.githubusercontent.com/meryemmi2000-ui/eurusd-feeds/refs/heads/main/data/pepperstone.csv' \
-            -o data/pepperstone.csv
-          echo "Downloading TwelveData..."
-          curl -v -L --fail --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
-            'https://raw.githubusercontent.com/meryemmi2000-ui/eurusd-feeds/refs/heads/main/data/twelvedata.csv' \
-            -o data/twelvedata.csv
-          echo "Files sizes:"
-          wc -c data/*.csv || true
-          date -u +"%Y-%m-%d %H:%M:%S UTC" > data/last_updated.txt
+        with: { persist-credentials: true }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,26 +23,139 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas
+          pip install pandas requests
 
-      - name: Run THANOS analysis (safe)
+      - name: Fetch feeds (TwelveData + Pepperstone if available)
+        env:
+          TD_API_KEY: ${{ secrets.TD_API_KEY }}
+        run: |
+          set -e
+          mkdir -p data
+          echo "Try Pepperstone raw (if exists)…"
+          curl -L --fail -A "Mozilla/5.0" \
+            "https://raw.githubusercontent.com/meryemmi2000-ui/eurusd-feeds/refs/heads/main/data/pepperstone.csv" \
+            -o data/pepperstone.csv || true
+
+          echo "Fetch TwelveData fresh…"
+          # 600 bougies M5 ≈ 2 jours, fuseau géré par TD
+          curl -L --fail --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
+            "https://api.twelvedata.com/time_series?symbol=EUR/USD&interval=5min&outputsize=600&format=CSV&apikey=${TD_API_KEY}" \
+            -o data/eurusd_m5.csv
+
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > data/last_updated.txt
+          echo "Sizes:"; wc -c data/* || true
+
+      - name: Run THANOS analysis (compute on full candles, export summaries)
         run: |
           python - <<'PY'
-          import pandas as pd
+          import pandas as pd, re, json
           from pathlib import Path
 
-          # Charger Pepperstone et TwelveData
-          p = pd.read_csv("data/pepperstone.csv", sep=None, engine="python")
-          t = pd.read_csv("data/twelvedata.csv", sep=";")
+          pip = 0.0001
+          thr = 3*pip
 
-          print("Pepperstone:", p.head(3))
-          print("TwelveData:", t.head(3))
+          # --- TwelveData (CSV standard: datetime,open,high,low,close,volume,…)
+          td = pd.read_csv("data/eurusd_m5.csv")
+          td = td[['datetime','open','high','low','close']].copy()
+          td['datetime'] = pd.to_datetime(td['datetime'], errors='coerce')
+          td = td.dropna(subset=['datetime']).sort_values('datetime')
+          td['datetime'] = td['datetime'].dt.floor('5min')
+          td = td.drop_duplicates('datetime')
+          td['source'] = 'twelvedata'
 
-          Path("data/thanos_summary.md").write_text("THANOS ran successfully ✅\n")
+          # --- Pepperstone (si présent), format libre : on essaie de parser
+          ps = None
+          pspath = Path("data/pepperstone.csv")
+          if pspath.exists():
+              try:
+                  # Essaie CSV normal
+                  tmp = pd.read_csv(pspath, sep=None, engine='python')
+                  # S'il y a les colonnes OHLC déjà propres
+                  cols = [c.lower() for c in tmp.columns]
+                  if {'time','open','high','low','close'} <= set(cols):
+                      # normaliser
+                      rename = {c:c.lower() for c in tmp.columns}
+                      tmp = tmp.rename(columns=rename)
+                      tmp['datetime'] = pd.to_datetime(tmp['time'], errors='coerce')
+                      ps = tmp[['datetime','open','high','low','close']].dropna()
+                  else:
+                      raise ValueError("Pepperstone columns not standard")
+              except Exception:
+                  # Fallback parsing ligne brute : "YYYY.MM.DD HH:MM O H L C …"
+                  rx = re.compile(r'(\\d{4}\\.\\d{2}\\.\\d{2})\\s+(\\d{2}:\\d{2})(?::\\d{2})?\\s+([0-9.]+)\\s+([0-9.]+)\\s+([0-9.]+)\\s+([0-9.]+)')
+                  rows=[]
+                  for ln in pspath.read_text(encoding='utf-8', errors='ignore').splitlines():
+                      m = rx.search(ln)
+                      if m:
+                          d,t,o,h,l,c = m.groups()
+                          ts = pd.to_datetime(d.replace('.','-')+' '+t+':00', errors='coerce')
+                          rows.append((ts, float(o), float(h), float(l), float(c)))
+                  if rows:
+                      ps = pd.DataFrame(rows, columns=['datetime','open','high','low','close'])
+              if ps is not None and len(ps):
+                  ps = ps.dropna().sort_values('datetime')
+                  ps['datetime'] = ps['datetime'].dt.floor('5min')
+                  ps = ps.drop_duplicates('datetime')
+                  ps['source'] = 'pepperstone'
+
+          # --- Sélection de la meilleure source (la plus fraîche gagne)
+          last_td = td['datetime'].max() if len(td) else None
+          last_ps = ps['datetime'].max() if (ps is not None and len(ps)) else None
+          if last_ps and (not last_td or last_ps >= last_td):
+              active = ps.copy()
+          else:
+              active = td.copy()
+
+          # --- Calcul indicateurs (sur TOUT le flux)
+          df = active[['datetime','open','high','low','close']].copy()
+          df = df.sort_values('datetime')
+          df['rollH20'] = df['high'].rolling(20, min_periods=20).max().shift(1)
+          df['rollL20'] = df['low'].rolling(20, min_periods=20).min().shift(1)
+          df['up2'] = (df['close'] > (df['rollH20'] + thr)) & (df['close'].shift(1) > (df['rollH20'].shift(1) + thr))
+          df['dn2'] = (df['close'] < (df['rollL20'] - thr)) & (df['close'].shift(1) < (df['rollL20'].shift(1) - thr))
+
+          # --- Export 1: flux uniformisé complet (si tu veux le télécharger)
+          df[['datetime','open','high','low','close']].to_csv("data/thanos_ready.csv", index=False)
+
+          # --- Export 2: résumé humain lisible
+          last = df.iloc[-1]
+          lines = [
+            "# THANOS — EURUSD M5 (auto/15m)",
+            f"Dernière bougie: {last['datetime']:%Y-%m-%d %H:%M:%S}  O={last['open']:.5f}  H={last['high']:.5f}  L={last['low']:.5f}  C={last['close']:.5f}",
+            f"Source active: {'Pepperstone' if (last_ps and (not last_td or last_ps >= last_td)) else 'TwelveData'}",
+            ""
+          ]
+          if bool(last['up2']):
+              lines.append("- ✅ **UP**: 2 clôtures > plus haut 20 bougies (+3 pips).")
+          if bool(last['dn2']):
+              lines.append("- ✅ **DOWN**: 2 clôtures < plus bas 20 bougies (−3 pips).")
+          if (not bool(last['up2'])) and (not bool(last['dn2'])):
+              lines.append("- Aucun signal sur la dernière bougie (règle 2-closes ±3 pips).")
+
+          Path("data/thanos_summary.md").write_text("\\n".join(lines), encoding="utf-8")
+
+          # --- Export 3: “preuves” = les 12 dernières bougies avec niveaux
+          ev = df.tail(12).copy()
+          ev.to_csv("data/thanos_evidence.md", index=False)  # CSV lisible sur GitHub
+          # (GitHub rend très bien un CSV simple ; si tu préfères un vrai tableau Markdown, on peut le faire)
+
+          # --- Export 4: état JSON léger (dernière bougie + features)
+          state = {
+            "datetime": str(last['datetime']),
+            "open": round(float(last['open']), 5),
+            "high": round(float(last['high']), 5),
+            "low":  round(float(last['low']), 5),
+            "close":round(float(last['close']),5),
+            "rollH20": None if pd.isna(last['rollH20']) else round(float(last['rollH20']),5),
+            "rollL20": None if pd.isna(last['rollL20']) else round(float(last['rollL20']),5),
+            "up2": bool(last['up2']),
+            "dn2": bool(last['dn2'])
+          }
+          Path("data/thanos_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
           PY
 
       - name: Commit results
         run: |
-          git add data/*
+          git add data/eurusd_m5.csv data/thanos_ready.csv data/thanos_summary.md data/thanos_evidence.md data/thanos_state.json data/last_updated.txt
           git commit -m "THANOS run" || true
           git push || true
