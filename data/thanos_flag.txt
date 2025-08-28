@@ -1,1 +1,0 @@
-ALERT|PRE-ALERT|id=2025-08-28T17:30-M5-TEST|pair=EURUSD|tf=M5|setup=Momentum Continuation|entry=1.17060|sl=1.16960|tp=1.17200,1.17300|validation=break direct du niveau 1.17060|invalidation=close M5 < 1.16960|expires=2025-08-28T18:00:00Z
