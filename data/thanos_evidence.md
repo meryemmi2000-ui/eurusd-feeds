@@ -1,6 +1,4 @@
 datetime,open,high,low,close,source,rollH20,rollL20,up2,dn2
-2025-09-04 17:30:00,1.16375,1.16394,1.16368,1.16388,twelvedata_repo,1.165,1.16314,False,False
-2025-09-04 17:35:00,1.16388,1.16422,1.16384,1.16412,twelvedata_repo,1.165,1.16314,False,False
 2025-09-04 17:40:00,1.16414,1.16435,1.16404,1.16411,twelvedata_repo,1.165,1.16314,False,False
 2025-09-04 17:45:00,1.16406,1.1642,1.1639,1.16393,twelvedata_repo,1.165,1.16314,False,False
 2025-09-04 17:50:00,1.16389,1.16416,1.16381,1.1641,twelvedata_repo,1.165,1.1633,False,False
@@ -11,3 +9,5 @@ datetime,open,high,low,close,source,rollH20,rollL20,up2,dn2
 2025-09-04 18:15:00,1.16373,1.164,1.16366,1.16396,twelvedata_repo,1.165,1.16339,False,False
 2025-09-04 18:20:00,1.164,1.16403,1.16361,1.16373,twelvedata_repo,1.165,1.16339,False,False
 2025-09-04 18:25:00,1.16372,1.1639,1.16363,1.16378,twelvedata_repo,1.165,1.16339,False,False
+2025-09-04 18:30:00,1.16379,1.16385,1.1636,1.16364,twelvedata_repo,1.16498,1.16339,False,False
+2025-09-04 18:35:00,1.16363,1.16376,1.1635,1.16366,twelvedata_repo,1.16484,1.16339,False,False
