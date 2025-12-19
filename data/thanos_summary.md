@@ -1,4 +1,11 @@
-## THANOS
-Aucune donnée disponible.
-- Vérifie le secret **TD_API_KEY** (Settings → Secrets)
-- Ou le fichier `data/twelvedata.csv` dans le repo
+# THANOS — EURUSD M5 (auto/15m)
+Dernière bougie: 2025-12-19 13:20:00  O=1.17112  H=1.17123  L=1.17092  C=1.17112
+Source active: twelvedata_repo
+
+- Aucun signal sur la dernière bougie.
+
+<details><summary>Debug</summary>
+
+- TD_API_KEY manquant.
+
+</details>
