@@ -1,5 +1,5 @@
 # THANOS — EURUSD M5 (auto/15m)
-Dernière bougie: 2026-04-03 12:40:00  O=1.15420  H=1.15421  L=1.15418  C=1.15418
+Dernière bougie: 2026-04-03 12:55:00  O=1.15441  H=1.15447  L=1.15441  C=1.15447
 Source active: twelvedata_repo
 
 - Aucun signal sur la dernière bougie.
