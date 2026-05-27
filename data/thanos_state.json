@@ -1,11 +1,11 @@
 {
-  "datetime": "2026-05-27 12:55:00",
-  "open": 1.16379,
-  "high": 1.16381,
-  "low": 1.16362,
-  "close": 1.16381,
-  "rollH20": 1.16443,
-  "rollL20": 1.1636,
+  "datetime": "2026-05-27 14:15:00",
+  "open": 1.16445,
+  "high": 1.16464,
+  "low": 1.16443,
+  "close": 1.16462,
+  "rollH20": 1.16614,
+  "rollL20": 1.16337,
   "up2": false,
   "dn2": false,
   "source": "twelvedata_repo"
